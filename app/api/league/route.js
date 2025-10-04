@@ -8,26 +8,27 @@ export async function GET() {
   try {
     const leagueData = await kv.get(LEAGUE_KEY);
     
-    if (!leagueData) {
-      // Return empty league structure if none exists
-      return NextResponse.json({
-        leagueSettings: {
-          scoring: 'half',
-          rosterSize: 9,
-          teamCount: 12
-        },
-        teams: Array.from({ length: 12 }, (_, i) => ({
-          id: i + 1,
-          name: `Team ${i + 1}`,
-          roster: []
-        }))
-      });
+    if (leagueData) {
+      console.log('League data loaded from Redis');
+      return NextResponse.json(leagueData);
     }
-
-    return NextResponse.json(leagueData);
+    
+    // Return empty league structure if none exists
+    console.log('No league data found, returning empty structure');
+    return NextResponse.json({
+      leagueSettings: {
+        scoring: 'half',
+        rosterSize: 9,
+        teamCount: 12
+      },
+      teams: Array.from({ length: 12 }, (_, i) => ({
+        id: i + 1,
+        name: `Team ${i + 1}`,
+        roster: []
+      }))
+    });
   } catch (error) {
-    console.error('Error fetching league data:', error);
-    // Fallback to empty league if KV isn't set up yet
+    console.error('Error fetching from Redis:', error);
     return NextResponse.json({
       leagueSettings: {
         scoring: 'half',
@@ -56,17 +57,25 @@ export async function POST(request) {
       );
     }
 
-    // Save to Vercel KV
-    await kv.set(LEAGUE_KEY, data);
+    console.log('Saving league data to Redis:', data.teams.length, 'teams');
 
+    // Save to Redis
+    await kv.set(LEAGUE_KEY, data);
+    
+    console.log('Data saved to Redis successfully');
+    
     return NextResponse.json({ 
       success: true,
-      message: 'League data saved successfully' 
+      message: 'League data saved to cloud storage',
+      storage: 'redis'
     });
   } catch (error) {
-    console.error('Error saving league data:', error);
+    console.error('Error saving to Redis:', error);
     return NextResponse.json(
-      { error: 'Failed to save league data' },
+      { 
+        error: 'Failed to save to cloud storage',
+        details: error.message 
+      },
       { status: 500 }
     );
   }
@@ -78,12 +87,12 @@ export async function DELETE() {
     await kv.del(LEAGUE_KEY);
     return NextResponse.json({ 
       success: true,
-      message: 'League data cleared successfully' 
+      message: 'League data cleared from cloud storage' 
     });
   } catch (error) {
-    console.error('Error clearing league data:', error);
+    console.error('Error clearing Redis data:', error);
     return NextResponse.json(
-      { error: 'Failed to clear league data' },
+      { error: 'Failed to clear data' },
       { status: 500 }
     );
   }
