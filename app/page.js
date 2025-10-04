@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Search, TrendingUp, Users, ArrowRight, AlertCircle, Calendar, Loader2, RefreshCw } from 'lucide-react';
+import { Search, TrendingUp, Users, ArrowRight, AlertCircle, Calendar, Loader2, RefreshCw, Award } from 'lucide-react';
 
 export default function NFLTradeAnalyzer() {
   const [view, setView] = useState('setup');
@@ -20,6 +20,7 @@ export default function NFLTradeAnalyzer() {
   const [searchTerm, setSearchTerm] = useState('');
   const [saving, setSaving] = useState(false);
   const [currentWeek, setCurrentWeek] = useState(5);
+  const [weeksRemaining, setWeeksRemaining] = useState(13);
 
   // Load data on mount
   useEffect(() => {
@@ -34,6 +35,7 @@ export default function NFLTradeAnalyzer() {
       const playersData = await playersRes.json();
       setAllPlayers(playersData.players || []);
       setCurrentWeek(playersData.currentWeek || 5);
+      setWeeksRemaining(playersData.weeksRemaining || 13);
 
       // Load league data
       const leagueRes = await fetch('/api/league');
@@ -100,9 +102,28 @@ export default function NFLTradeAnalyzer() {
 
   const getPlayerPoints = (player) => {
     const scoring = leagueSettings.scoring;
-    if (scoring === 'standard') return player.fantasyPoints.standard;
-    if (scoring === 'half') return player.fantasyPoints.halfPPR;
-    return player.fantasyPoints.fullPPR;
+    if (scoring === 'standard') {
+      return {
+        ytd: player.fantasyPoints.ytdStandard,
+        remaining: player.fantasyPoints.projRemainingStandard,
+        fullSeason: player.fantasyPoints.projFullSeasonStandard,
+        ppg: player.fantasyPoints.ppgStandard
+      };
+    }
+    if (scoring === 'half') {
+      return {
+        ytd: player.fantasyPoints.ytdHalf,
+        remaining: player.fantasyPoints.projRemainingHalf,
+        fullSeason: player.fantasyPoints.projFullSeasonHalf,
+        ppg: player.fantasyPoints.ppgHalf
+      };
+    }
+    return {
+      ytd: player.fantasyPoints.ytdFull,
+      remaining: player.fantasyPoints.projRemainingFull,
+      fullSeason: player.fantasyPoints.projFullSeasonFull,
+      ppg: player.fantasyPoints.ppgFull
+    };
   };
 
   const analyzeTeamNeeds = (team) => {
@@ -131,33 +152,62 @@ export default function NFLTradeAnalyzer() {
     const myTeam = teams.find(t => t.id === selectedTeam);
     const otherTeams = teams.filter(t => t.id !== selectedTeam);
     
-    const myPlayerValue = getPlayerPoints(selectedPlayer);
+    const myPlayerValue = getPlayerPoints(selectedPlayer).fullSeason;
     const candidates = [];
 
     otherTeams.forEach(team => {
       const teamNeeds = analyzeTeamNeeds(team);
       
+      // Does this team need my player's position?
       const needsMyPosition = teamNeeds.needs.includes(selectedPlayer.position) || 
         (teamNeeds.counts[selectedPlayer.position] < 2 && ['RB', 'WR', 'TE'].includes(selectedPlayer.position));
 
       team.roster.forEach(player => {
+        // Check if player matches target position
         if (player.position === targetPosition || 
             (targetPosition === 'FLEX' && ['RB', 'WR', 'TE'].includes(player.position))) {
           
-          const playerValue = getPlayerPoints(player);
-          const valueDiff = Math.abs(playerValue - myPlayerValue);
-          const valueRatio = playerValue / myPlayerValue;
+          const theirPlayerValue = getPlayerPoints(player).fullSeason;
+          const valueDiff = theirPlayerValue - myPlayerValue;
+          const valueRatio = theirPlayerValue / myPlayerValue;
 
-          const needScore = needsMyPosition ? 100 : 0;
-          const valueScore = Math.max(0, 100 - (valueDiff / myPlayerValue * 100));
-          const fairnessScore = valueRatio >= 0.85 && valueRatio <= 1.15 ? 50 : 0;
+          // PRIORITIZE EQUAL OR HIGHER VALUE
+          // Only consider players that are at least 85% of my player's value OR better
+          if (valueRatio < 0.85) {
+            return; // Skip low-value players
+          }
 
-          const totalScore = needScore + valueScore + fairnessScore;
+          // Scoring system (out of 300 points)
+          let totalScore = 0;
+
+          // 1. VALUE SCORE (100 points max) - Heavily favor equal or better
+          if (valueRatio >= 1.0) {
+            // Better player - give full points plus bonus
+            totalScore += 100 + Math.min(50, (valueRatio - 1.0) * 100);
+          } else {
+            // Slightly worse player (85-100%) - reduce score
+            totalScore += (valueRatio - 0.85) / 0.15 * 100;
+          }
+
+          // 2. TEAM NEEDS SCORE (100 points)
+          if (needsMyPosition) {
+            totalScore += 100; // Team desperately needs my position
+          } else if (teamNeeds.counts[selectedPlayer.position] < 3) {
+            totalScore += 50; // Team could use depth
+          }
+
+          // 3. FAIRNESS SCORE (50 points) - Is it a fair trade?
+          if (valueRatio >= 0.90 && valueRatio <= 1.10) {
+            totalScore += 50; // Very fair trade
+          } else if (valueRatio >= 0.85 && valueRatio <= 1.15) {
+            totalScore += 30; // Somewhat fair
+          }
 
           candidates.push({
             team: team.name,
             player,
-            playerValue,
+            myPlayerValue,
+            theirPlayerValue,
             valueDiff,
             valueRatio,
             needsMyPosition,
@@ -168,8 +218,11 @@ export default function NFLTradeAnalyzer() {
       });
     });
 
+    // Sort by score (highest first) - this prioritizes better players
     candidates.sort((a, b) => b.score - a.score);
-    setTradeResults(candidates.slice(0, 5));
+    
+    // Return top 20
+    setTradeResults(candidates.slice(0, 20));
   };
 
   const availablePlayers = allPlayers.filter(player => 
@@ -197,7 +250,7 @@ export default function NFLTradeAnalyzer() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-4xl font-bold text-white mb-2">NFL Trade Analyzer</h1>
-                <p className="text-blue-200">Live NFL data • {allPlayers.length} active players • Week {currentWeek}</p>
+                <p className="text-blue-200">Live NFL data • {allPlayers.length} active players • Week {currentWeek} • {weeksRemaining} weeks remaining</p>
               </div>
               <button
                 onClick={loadData}
@@ -267,32 +320,35 @@ export default function NFLTradeAnalyzer() {
                         className="w-full bg-white/20 text-white font-bold border border-white/30 rounded p-2 mb-3"
                       />
                       <div className="space-y-2">
-                        {team.roster.map(player => (
-                          <div key={player.id} className="flex items-center justify-between bg-white/10 p-2 rounded">
-                            <div className="flex items-center gap-2">
-                              <span className={`px-2 py-1 rounded text-xs font-bold ${
-                                player.position === 'QB' ? 'bg-purple-500' :
-                                player.position === 'RB' ? 'bg-green-500' :
-                                player.position === 'WR' ? 'bg-blue-500' :
-                                player.position === 'TE' ? 'bg-yellow-500' :
-                                player.position === 'DEF' ? 'bg-red-500' :
-                                'bg-gray-500'
-                              } text-white`}>
-                                {player.position}
-                              </span>
-                              <div>
-                                <div className="text-white text-sm font-semibold">{player.name}</div>
-                                <div className="text-white/60 text-xs">{player.team} • {getPlayerPoints(player)} pts</div>
+                        {team.roster.map(player => {
+                          const pts = getPlayerPoints(player);
+                          return (
+                            <div key={player.id} className="flex items-center justify-between bg-white/10 p-2 rounded">
+                              <div className="flex items-center gap-2">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                  player.position === 'QB' ? 'bg-purple-500' :
+                                  player.position === 'RB' ? 'bg-green-500' :
+                                  player.position === 'WR' ? 'bg-blue-500' :
+                                  player.position === 'TE' ? 'bg-yellow-500' :
+                                  player.position === 'DEF' ? 'bg-red-500' :
+                                  'bg-gray-500'
+                                } text-white`}>
+                                  {player.position}
+                                </span>
+                                <div>
+                                  <div className="text-white text-sm font-semibold">{player.name}</div>
+                                  <div className="text-white/60 text-xs">{player.team} • {pts.fullSeason} proj pts</div>
+                                </div>
                               </div>
+                              <button
+                                onClick={() => removePlayerFromTeam(team.id, player.id)}
+                                className="text-red-400 hover:text-red-300 text-xs"
+                              >
+                                Remove
+                              </button>
                             </div>
-                            <button
-                              onClick={() => removePlayerFromTeam(team.id, player.id)}
-                              className="text-red-400 hover:text-red-300 text-xs"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                         {team.roster.length === 0 && (
                           <p className="text-white/50 text-sm text-center py-4">No players added</p>
                         )}
@@ -340,7 +396,7 @@ export default function NFLTradeAnalyzer() {
                           <span className="text-white/70 text-xs">{player.team}</span>
                         </div>
                         <div className="flex items-center justify-between text-xs mb-2">
-                          <span className="text-white/80">Proj: {points} pts</span>
+                          <span className="text-white/80">Proj: {points.fullSeason} pts</span>
                           <span className="text-white/60">Bye: {player.bye}</span>
                         </div>
                         {player.status !== 'Active' && (
@@ -399,7 +455,7 @@ export default function NFLTradeAnalyzer() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-4xl font-bold text-white mb-2">Trade Analyzer</h1>
-              <p className="text-blue-200">Find the best trade targets for your team</p>
+              <p className="text-blue-200">Find the best trade targets - prioritizing equal or better value</p>
             </div>
             <button
               onClick={() => setView('setup')}
@@ -449,11 +505,14 @@ export default function NFLTradeAnalyzer() {
               className="w-full bg-white/20 text-white border border-white/30 rounded-lg p-3 focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
             >
               <option value="">Choose player...</option>
-              {selectedTeam && teams.find(t => t.id === selectedTeam)?.roster.map(player => (
-                <option key={player.id} value={player.id}>
-                  {player.position} - {player.name} ({getPlayerPoints(player)} pts)
-                </option>
-              ))}
+              {selectedTeam && teams.find(t => t.id === selectedTeam)?.roster.map(player => {
+                const pts = getPlayerPoints(player);
+                return (
+                  <option key={player.id} value={player.id}>
+                    {player.position} - {player.name} ({pts.fullSeason} pts)
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -490,28 +549,41 @@ export default function NFLTradeAnalyzer() {
             className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-12 py-4 rounded-xl font-bold text-lg hover:from-green-600 hover:to-emerald-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             <TrendingUp size={24} />
-            Find Trade Targets
+            Find Top 20 Trade Targets
           </button>
         </div>
 
         {tradeResults.length > 0 && (
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-            <h2 className="text-2xl font-bold text-white mb-6">Top 5 Trade Targets</h2>
+            <h2 className="text-2xl font-bold text-white mb-2">Top 20 Trade Targets</h2>
+            <p className="text-blue-200 mb-6">Prioritizing equal or higher value players • Sorted by match score</p>
             <div className="space-y-4">
               {tradeResults.map((result, idx) => {
                 const myPoints = getPlayerPoints(selectedPlayer);
                 const theirPoints = getPlayerPoints(result.player);
+                const isUpgrade = result.valueDiff > 0;
                 return (
-                  <div key={idx} className="bg-white/10 rounded-xl p-6 border border-white/20 hover:bg-white/20 transition-all">
+                  <div key={idx} className={`rounded-xl p-6 border transition-all ${
+                    isUpgrade 
+                      ? 'bg-green-500/10 border-green-400/30 hover:bg-green-500/20' 
+                      : 'bg-white/10 border-white/20 hover:bg-white/20'
+                  }`}>
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-3">
-                        <div className="bg-gradient-to-br from-yellow-400 to-orange-500 text-white w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg">
-                          #{idx + 1}
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${
+                          idx < 3 
+                            ? 'bg-gradient-to-br from-yellow-400 to-orange-500 text-white'
+                            : isUpgrade
+                              ? 'bg-green-500 text-white'
+                              : 'bg-white/20 text-white'
+                        }`}>
+                          {idx < 3 ? <Award size={20} /> : `#${idx + 1}`}
                         </div>
                         <div>
                           <h3 className="text-xl font-bold text-white">{result.team}</h3>
                           <p className="text-blue-200 text-sm">
-                            {result.needsMyPosition ? '✓ Needs your position' : 'Could upgrade'}
+                            {result.needsMyPosition ? '✓ Needs your position' : 'Could upgrade'} 
+                            {isUpgrade && ' • 🔥 VALUE UPGRADE'}
                           </p>
                         </div>
                       </div>
@@ -538,11 +610,14 @@ export default function NFLTradeAnalyzer() {
                           </span>
                           <span className="text-white font-bold">{selectedPlayer.name}</span>
                         </div>
-                        <div className="text-sm text-white/80 mb-1">
-                          {selectedPlayer.team} • Proj: {myPoints} pts
+                        <div className="space-y-1 text-sm text-white/80">
+                          <div>{selectedPlayer.team}</div>
+                          <div>YTD: {myPoints.ytd} pts</div>
+                          <div>Proj Full: {myPoints.fullSeason} pts</div>
+                          <div>PPG: {myPoints.ppg}</div>
                         </div>
                         {selectedPlayer.status !== 'Active' && (
-                          <span className="bg-red-500/30 text-red-200 px-2 py-1 rounded text-xs">
+                          <span className="bg-red-500/30 text-red-200 px-2 py-1 rounded text-xs mt-2 inline-block">
                             {selectedPlayer.status}
                           </span>
                         )}
@@ -552,7 +627,11 @@ export default function NFLTradeAnalyzer() {
                         </div>
                       </div>
 
-                      <div className="bg-green-500/20 rounded-lg p-4 border border-green-400/30">
+                      <div className={`rounded-lg p-4 border ${
+                        isUpgrade 
+                          ? 'bg-green-500/30 border-green-400/50' 
+                          : 'bg-white/10 border-white/20'
+                      }`}>
                         <div className="text-white/70 text-sm mb-2">You Receive</div>
                         <div className="flex items-center gap-2 mb-2">
                           <span className={`px-2 py-1 rounded text-xs font-bold ${
@@ -566,11 +645,14 @@ export default function NFLTradeAnalyzer() {
                           </span>
                           <span className="text-white font-bold">{result.player.name}</span>
                         </div>
-                        <div className="text-sm text-white/80 mb-1">
-                          {result.player.team} • Proj: {theirPoints} pts
+                        <div className="space-y-1 text-sm text-white/80">
+                          <div>{result.player.team}</div>
+                          <div>YTD: {theirPoints.ytd} pts</div>
+                          <div>Proj Full: {theirPoints.fullSeason} pts</div>
+                          <div>PPG: {theirPoints.ppg}</div>
                         </div>
                         {result.player.status !== 'Active' && (
-                          <span className="bg-red-500/30 text-red-200 px-2 py-1 rounded text-xs">
+                          <span className="bg-red-500/30 text-red-200 px-2 py-1 rounded text-xs mt-2 inline-block">
                             {result.player.status}
                           </span>
                         )}
@@ -583,8 +665,8 @@ export default function NFLTradeAnalyzer() {
 
                     <div className="flex items-center justify-between bg-white/10 rounded-lg p-3">
                       <div className="text-sm text-white/80">
-                        Value Difference: <span className={theirPoints > myPoints ? 'text-green-400' : 'text-red-400'}>
-                          {theirPoints > myPoints ? '+' : ''}{(theirPoints - myPoints).toFixed(1)} pts
+                        Value Difference: <span className={isUpgrade ? 'text-green-400 font-bold' : 'text-yellow-400'}>
+                          {isUpgrade ? '+' : ''}{result.valueDiff.toFixed(1)} pts ({((result.valueRatio - 1) * 100).toFixed(1)}%)
                         </span>
                       </div>
                       <div className="text-sm text-white/80">
@@ -595,6 +677,13 @@ export default function NFLTradeAnalyzer() {
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {selectedPlayer && targetPosition && tradeResults.length === 0 && (
+          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-12 border border-white/20 text-center">
+            <TrendingUp size={48} className="mx-auto text-white/50 mb-4" />
+            <p className="text-white/70 text-lg">Click "Find Top 20 Trade Targets" to analyze potential trades</p>
           </div>
         )}
       </div>
