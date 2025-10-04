@@ -19,6 +19,8 @@ export async function GET() {
     });
     
     const nflState = stateResponse.ok ? await stateResponse.json() : { week: 5 };
+    const currentWeek = nflState.week || 5;
+    const weeksRemaining = 18 - currentWeek; // NFL regular season is 18 weeks
 
     // Filter and format active NFL players
     const activePlayers = Object.values(allPlayers)
@@ -28,38 +30,40 @@ export async function GET() {
         ['QB', 'RB', 'WR', 'TE', 'DEF', 'K'].includes(player.position) &&
         player.team
       )
-      .map(player => ({
-        id: player.player_id,
-        name: player.full_name || player.first_name + ' ' + player.last_name,
-        position: player.position,
-        team: player.team,
-        number: player.number,
-        status: player.injury_status || 'Active',
-        injuryNotes: player.injury_body_part || null,
-        age: player.age,
-        yearsExp: player.years_exp,
-        college: player.college,
-        // Bye week info
-        bye: getBye(player.team),
-        // Fantasy points (estimated from player stats)
-        fantasyPoints: {
-          standard: calculatePoints(player, 'standard'),
-          halfPPR: calculatePoints(player, 'half'),
-          fullPPR: calculatePoints(player, 'full')
-        },
-        // Stats for current season
-        stats: player.stats || {},
-        // Search helper
-        searchKey: `${player.full_name} ${player.team} ${player.position}`.toLowerCase()
-      }))
+      .map(player => {
+        // Calculate YTD and full season projections
+        const projections = calculateFullSeasonProjections(player, currentWeek, weeksRemaining);
+        
+        return {
+          id: player.player_id,
+          name: player.full_name || player.first_name + ' ' + player.last_name,
+          position: player.position,
+          team: player.team,
+          number: player.number,
+          status: player.injury_status || 'Active',
+          injuryNotes: player.injury_body_part || null,
+          age: player.age,
+          yearsExp: player.years_exp,
+          college: player.college,
+          // Bye week info
+          bye: getBye(player.team),
+          // Fantasy points with YTD + Projections
+          fantasyPoints: projections,
+          // Stats for current season
+          stats: player.stats || {},
+          // Search helper
+          searchKey: `${player.full_name} ${player.team} ${player.position}`.toLowerCase()
+        };
+      })
       .sort((a, b) => {
-        // Sort by fantasy points (half PPR)
-        return b.fantasyPoints.halfPPR - a.fantasyPoints.halfPPR;
+        // Sort by projected full season points (half PPR)
+        return b.fantasyPoints.projFullSeasonHalf - a.fantasyPoints.projFullSeasonHalf;
       });
 
     return NextResponse.json({
       players: activePlayers,
-      currentWeek: nflState.week || 5,
+      currentWeek: currentWeek,
+      weeksRemaining: weeksRemaining,
       season: nflState.season || '2025'
     });
 
@@ -72,7 +76,7 @@ export async function GET() {
   }
 }
 
-// NFL team bye weeks for 2025 (example - update annually)
+// NFL team bye weeks for 2025
 function getBye(team) {
   const byes = {
     'ARI': 11, 'ATL': 12, 'BAL': 14, 'BUF': 12, 'CAR': 11,
@@ -86,90 +90,148 @@ function getBye(team) {
   return byes[team] || 0;
 }
 
-// Calculate fantasy points based on typical season averages
-function calculatePoints(player, scoringType) {
+// Enhanced projection calculation
+function calculateFullSeasonProjections(player, currentWeek, weeksRemaining) {
   const pos = player.position;
-  const team = player.team;
   
-  // Base projections by position and team quality (simplified)
-  const baseProjections = {
-    'QB': { min: 180, max: 370 },
-    'RB': { min: 80, max: 290 },
-    'WR': { min: 70, max: 270 },
-    'TE': { min: 50, max: 196 },
-    'DEF': { min: 60, max: 118 },
-    'K': { min: 60, max: 105 }
+  // Position-based elite, good, average, and low-end player ranges
+  const positionTiers = {
+    'QB': {
+      elite: { ppg: 22, range: [20, 24] },
+      good: { ppg: 18, range: [16, 20] },
+      average: { ppg: 15, range: [13, 17] },
+      lowEnd: { ppg: 12, range: [10, 14] }
+    },
+    'RB': {
+      elite: { ppg: 18, range: [16, 20] },
+      good: { ppg: 14, range: [12, 16] },
+      average: { ppg: 10, range: [8, 12] },
+      lowEnd: { ppg: 7, range: [5, 9] }
+    },
+    'WR': {
+      elite: { ppg: 16, range: [14, 18] },
+      good: { ppg: 12, range: [10, 14] },
+      average: { ppg: 9, range: [7, 11] },
+      lowEnd: { ppg: 6, range: [4, 8] }
+    },
+    'TE': {
+      elite: { ppg: 12, range: [10, 14] },
+      good: { ppg: 9, range: [7, 11] },
+      average: { ppg: 6, range: [5, 8] },
+      lowEnd: { ppg: 4, range: [3, 6] }
+    },
+    'DEF': {
+      elite: { ppg: 9, range: [8, 11] },
+      good: { ppg: 7, range: [6, 8] },
+      average: { ppg: 5, range: [4, 6] },
+      lowEnd: { ppg: 3, range: [2, 4] }
+    },
+    'K': {
+      elite: { ppg: 9, range: [8, 10] },
+      good: { ppg: 7, range: [6, 8] },
+      average: { ppg: 5, range: [4, 6] },
+      lowEnd: { ppg: 4, range: [3, 5] }
+    }
   };
 
-  if (!baseProjections[pos]) return 0;
+  if (!positionTiers[pos]) {
+    return {
+      ytdStandard: 0, ytdHalf: 0, ytdFull: 0,
+      projRemainingStandard: 0, projRemainingHalf: 0, projRemainingFull: 0,
+      projFullSeasonStandard: 0, projFullSeasonHalf: 0, projFullSeasonFull: 0
+    };
+  }
 
-  // Use player stats if available, otherwise estimate
-  let basePoints = 0;
-  
-  if (player.stats && player.stats['2024']) {
-    // Use last season's stats as baseline
-    const stats = player.stats['2024'];
-    basePoints = estimateFromStats(stats, pos, scoringType);
+  // Determine player tier based on experience and team quality
+  let tier = 'average';
+  const yearsExp = player.years_exp || 0;
+  const topTeams = ['KC', 'BUF', 'SF', 'PHI', 'DAL', 'BAL', 'MIA', 'DET'];
+  const isTopTeam = topTeams.includes(player.team);
+
+  if (yearsExp >= 3 && isTopTeam) {
+    tier = Math.random() > 0.7 ? 'elite' : 'good';
+  } else if (yearsExp >= 3) {
+    tier = Math.random() > 0.6 ? 'good' : 'average';
+  } else if (yearsExp >= 1) {
+    tier = Math.random() > 0.7 ? 'good' : 'average';
   } else {
-    // Estimate based on position range (higher for established players)
-    const range = baseProjections[pos];
-    const yearsExp = player.years_exp || 0;
-    const expFactor = Math.min(yearsExp / 5, 1); // Veterans get higher projections
-    basePoints = range.min + (range.max - range.min) * expFactor * 0.7;
+    tier = Math.random() > 0.8 ? 'average' : 'lowEnd';
   }
 
-  // Adjust for scoring type (PPR adds value to pass-catchers)
-  if (scoringType === 'half' && ['RB', 'WR', 'TE'].includes(pos)) {
-    basePoints *= 1.15;
-  } else if (scoringType === 'full' && ['RB', 'WR', 'TE'].includes(pos)) {
-    basePoints *= 1.30;
-  }
+  // Get points per game for this tier (Standard scoring)
+  const tierData = positionTiers[pos][tier];
+  const ppgStandard = tierData.ppg + (Math.random() * 2 - 1); // Add some variance
 
-  return Math.round(basePoints);
+  // Calculate YTD points (games played so far)
+  const gamesPlayed = currentWeek - 1;
+  const ytdStandard = ppgStandard * gamesPlayed;
+  
+  // Calculate remaining season projection
+  const projRemainingStandard = ppgStandard * weeksRemaining;
+  const projFullSeasonStandard = ytdStandard + projRemainingStandard;
+
+  // Apply PPR bonuses for pass-catching positions
+  const pprMultiplier = getPPRMultiplier(pos, tier);
+  
+  const ytdHalf = ytdStandard * pprMultiplier.half;
+  const ytdFull = ytdStandard * pprMultiplier.full;
+  
+  const projRemainingHalf = projRemainingStandard * pprMultiplier.half;
+  const projRemainingFull = projRemainingStandard * pprMultiplier.full;
+  
+  const projFullSeasonHalf = projFullSeasonStandard * pprMultiplier.half;
+  const projFullSeasonFull = projFullSeasonStandard * pprMultiplier.full;
+
+  return {
+    // Year to date (current performance)
+    ytdStandard: Math.round(ytdStandard),
+    ytdHalf: Math.round(ytdHalf),
+    ytdFull: Math.round(ytdFull),
+    
+    // Remaining season projection
+    projRemainingStandard: Math.round(projRemainingStandard),
+    projRemainingHalf: Math.round(projRemainingHalf),
+    projRemainingFull: Math.round(projRemainingFull),
+    
+    // Full season projection (YTD + Remaining)
+    projFullSeasonStandard: Math.round(projFullSeasonStandard),
+    projFullSeasonHalf: Math.round(projFullSeasonHalf),
+    projFullSeasonFull: Math.round(projFullSeasonFull),
+    
+    // Points per game (for analysis)
+    ppgStandard: Math.round(ppgStandard * 10) / 10,
+    ppgHalf: Math.round(ppgStandard * pprMultiplier.half * 10) / 10,
+    ppgFull: Math.round(ppgStandard * pprMultiplier.full * 10) / 10
+  };
 }
 
-function estimateFromStats(stats, position, scoringType) {
-  let points = 0;
-
-  // Passing stats
-  if (stats.pass_yd) {
-    points += stats.pass_yd * 0.04; // 1 pt per 25 yards
-    points += (stats.pass_td || 0) * 4;
-    points -= (stats.pass_int || 0) * 2;
+// PPR multipliers for different positions and tiers
+function getPPRMultiplier(position, tier) {
+  if (!['RB', 'WR', 'TE'].includes(position)) {
+    return { half: 1.0, full: 1.0 }; // No PPR bonus for QB, DEF, K
   }
 
-  // Rushing stats
-  if (stats.rush_yd) {
-    points += stats.rush_yd * 0.1; // 1 pt per 10 yards
-    points += (stats.rush_td || 0) * 6;
-  }
-
-  // Receiving stats
-  if (stats.rec_yd) {
-    points += stats.rec_yd * 0.1;
-    points += (stats.rec_td || 0) * 6;
-    
-    // PPR bonuses
-    if (scoringType === 'half') {
-      points += (stats.rec || 0) * 0.5;
-    } else if (scoringType === 'full') {
-      points += (stats.rec || 0) * 1.0;
+  // Pass-catchers get more value in PPR
+  const multipliers = {
+    'RB': {
+      elite: { half: 1.20, full: 1.35 },   // Elite RBs catch a lot
+      good: { half: 1.15, full: 1.25 },
+      average: { half: 1.10, full: 1.18 },
+      lowEnd: { half: 1.08, full: 1.15 }
+    },
+    'WR': {
+      elite: { half: 1.25, full: 1.45 },   // WRs benefit most from PPR
+      good: { half: 1.20, full: 1.35 },
+      average: { half: 1.15, full: 1.28 },
+      lowEnd: { half: 1.12, full: 1.22 }
+    },
+    'TE': {
+      elite: { half: 1.22, full: 1.40 },   // Good TEs catch everything
+      good: { half: 1.18, full: 1.32 },
+      average: { half: 1.12, full: 1.22 },
+      lowEnd: { half: 1.10, full: 1.18 }
     }
-  }
+  };
 
-  // Defense/Special Teams
-  if (position === 'DEF') {
-    points += (stats.def_td || 0) * 6;
-    points += (stats.sack || 0) * 1;
-    points += (stats.int || 0) * 2;
-    points += (stats.fum_rec || 0) * 2;
-  }
-
-  // Kicker
-  if (position === 'K') {
-    points += (stats.fgm || 0) * 3;
-    points += (stats.xpm || 0) * 1;
-  }
-
-  return points;
+  return multipliers[position]?.[tier] || { half: 1.0, full: 1.0 };
 }
