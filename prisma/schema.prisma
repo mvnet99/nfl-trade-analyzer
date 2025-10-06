@@ -1,0 +1,64 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+provider = “prisma-client-js”
+}
+
+datasource db {
+provider = “postgresql”
+url = env(“DATABASE_URL”)
+}
+
+model League {
+id String @id @default(cuid())
+name String @default(“My League”)
+teamCount Int @default(12)
+scoringType String @default(“PPR”) // “Standard”, “Half-PPR”, “PPR”
+qbCount Int @default(1)
+rbCount Int @default(2)
+wrCount Int @default(2)
+teCount Int @default(1)
+flexCount Int @default(1)
+defCount Int @default(1)
+kCount Int @default(1)
+benchCount Int @default(5)
+irCount Int @default(1)
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+teams Team[]
+}
+
+model Team {
+id String @id @default(cuid())
+leagueId String
+teamName String
+ownerName String?
+teamNumber Int
+league League @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+players Player[]
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+
+@@unique([leagueId, teamNumber])
+}
+
+model Player {
+id String @id @default(cuid())
+teamId String
+nflPlayerId String // ESPN or NFL.com player ID
+playerName String
+position String // QB, RB, WR, TE, DEF, K
+nflTeam String // e.g., “KC”, “SF”
+rosterSlot String // “STARTER”, “BENCH”, “IR”
+byeWeek Int?
+injuryStatus String? // “Healthy”, “Questionable”, “Doubtful”, “Out”, “IR”
+ytdPoints Float @default(0)
+projectedPoints Float @default(0)
+team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+
+@@index([teamId])
+@@index([nflPlayerId])
+}
